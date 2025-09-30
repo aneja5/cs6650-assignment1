@@ -1,5 +1,11 @@
 package cs6650.assignment1.server;
 
+import cs6650.assignment1.model.ChatMessage;
+
+import com.google.gson.Gson;
+import com.google.gson.JsonSyntaxException;
+
+import cs6650.assignment1.model.ServerResponse;
 import org.java_websocket.WebSocket;
 import org.java_websocket.handshake.ClientHandshake;
 import org.java_websocket.server.WebSocketServer;
@@ -17,6 +23,7 @@ public class ChatServer extends WebSocketServer{
     // track which room each client belongs to
     private final ConcurrentHashMap<WebSocket, String> clientRooms = new ConcurrentHashMap<>();
 
+    private final Gson gson = new Gson();
 
     public ChatServer(int port) {
         super(new InetSocketAddress(port));
@@ -43,14 +50,66 @@ public class ChatServer extends WebSocketServer{
 
     @Override
     public void onMessage(WebSocket conn, String message) {
-        String roomId = clientRooms.get(conn);
-        if (roomId != null) {
-            // broadcast to all in the same room
-            for (WebSocket client : rooms.get(roomId)) {
-                client.send(message);
+        try {
+            ChatMessage msg = gson.fromJson(message, ChatMessage.class);
+
+            // Validate
+            if (!isValid(msg)) {
+                conn.send("{\"status\":\"ERROR\",\"error\":\"Invalid message format\"}");
+                return;
             }
+
+            ServerResponse res = new ServerResponse("OK", msg);
+            String response = gson.toJson(res);
+
+            // Broadcast to all in room
+            String roomId = clientRooms.get(conn);
+            if (roomId != null) {
+                for (WebSocket client : rooms.get(roomId)) {
+                    client.send(response);
+                }
+            }
+        } catch (JsonSyntaxException e) {
+            conn.send("{\"status\":\"ERROR\",\"error\":\"Malformed JSON\"}");
         }
     }
+
+    private boolean isValid(ChatMessage msg) {
+        if (msg == null) return false;
+
+        // userId must be numeric string 1–100000
+        try {
+            int uid = Integer.parseInt(msg.userId);
+            if (uid < 1 || uid > 100000) return false;
+        } catch (NumberFormatException e) {
+            return false;
+        }
+
+        // username 3–20 chars alphanumeric
+        if (msg.username == null || !msg.username.matches("^[a-zA-Z0-9]{3,20}$")) {
+            return false;
+        }
+
+        // message 1–500 chars
+        if (msg.message == null || msg.message.length() < 1 || msg.message.length() > 500) {
+            return false;
+        }
+
+        // timestamp must be ISO-8601
+        try {
+            Instant.parse(msg.timestamp);
+        } catch (Exception e) {
+            return false;
+        }
+
+        // messageType must be valid
+        if (!(msg.messageType.equals("TEXT") || msg.messageType.equals("JOIN") || msg.messageType.equals("LEAVE"))) {
+            return false;
+        }
+
+        return true;
+    }
+
 
     @Override
     public void onClose(WebSocket conn, int code, String reason, boolean remote) {
@@ -72,9 +131,13 @@ public class ChatServer extends WebSocketServer{
     }
 
     public static void main(String[] args) throws Exception {
-        int port = 9090;
-        ChatServer server = new ChatServer(port);
-        server.start();
-        System.out.println("Listening on ws://localhost:" + port + "/chat/{roomId}");
+        int wsPort = 9090;
+        int httpPort = 8081;
+
+        ChatServer wsServer = new ChatServer(wsPort);
+        wsServer.start();
+        System.out.println("WebSocket listening on ws://localhost:" + wsPort + "/chat/{roomId}");
+
+        HealthServer.start(httpPort);
     }
 }
